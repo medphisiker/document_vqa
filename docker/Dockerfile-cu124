@@ -1,0 +1,56 @@
+# Образы для контейнера
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG CMAKE_VERSION=3.26.1
+ARG PYTORCH_CUDA_REPO=cu124
+
+# Отключаем интерактивные вопросы при установке пакетов
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Устанавливаем инструменты для сборки
+RUN <<EOF
+apt update -y && apt upgrade -y && apt install -y --no-install-recommends  \
+    git \
+    git-lfs \
+    python3 \
+    python3-pip \
+    python3-dev \
+    wget \
+    vim \
+    libsndfile1 \
+&& rm -rf /var/lib/apt/lists/*
+EOF
+
+# Установка CMake
+ARG CMAKE_URL=https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-Linux-x86_64.sh
+ARG CMAKE_OPT=/opt/cmake-${CMAKE_VERSION}
+ARG CMAKE_OPT_BIN=/opt/cmake-${CMAKE_VERSION}/bin/*
+
+RUN wget ${CMAKE_URL} -q -O /tmp/cmake-install.sh \
+    && chmod u+x /tmp/cmake-install.sh \
+    && mkdir ${CMAKE_OPT} \
+    && /tmp/cmake-install.sh --skip-license --prefix=${CMAKE_OPT} \
+    && rm /tmp/cmake-install.sh \
+    && ln -s ${CMAKE_OPT_BIN} /usr/local/bin
+
+# Создаем ссылку для python
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# Устанавливаем git-lfs
+RUN git lfs install
+
+# Устанавливаем Python пакеты
+ARG pytorch_url=https://download.pytorch.org/whl/${PYTORCH_CUDA_REPO}
+RUN pip3 install --no-cache-dir networkx==3.1
+RUN pip3 install --no-cache-dir torch==2.4.0 torchvision==0.19 --index-url ${pytorch_url}
+
+RUN pip3 install --no-cache-dir transformers==4.46.1 \
+    accelerate==1.0.1 \
+    qwen-vl-utils==0.0.8
+
+RUN pip3 install --no-cache-dir --no-build-isolation flash-attn==2.6.1
+
+# Создаем рабочую директорию
+WORKDIR /workspace
+
+# Запускаем терминал
+CMD ["/bin/bash"]
