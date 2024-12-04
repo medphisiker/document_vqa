@@ -77,4 +77,4 @@
 
 #### 2.2. Блок-схема PoC решения
 
-![[../files/ml_system_design_doc 2024-11-29 03.24.09.excalidraw.png]]
+![](../files/ml_system_design_doc%202024-11-29%2003.24.09.excalidraw.png)
