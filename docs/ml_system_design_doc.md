@@ -490,4 +490,117 @@ VLLM модель хорошо извлекает информацию из до
 
 Наш индустриальный партнер готов себе это позволить.
 
+### 4. Внедрение для production систем
+
+#### 4.1. Архитектура ПО VLMHyperBench
+
+- Блок схема и пояснения: сервисы, назначения, методы API
+
+Полный вариант Архитектуры нашего ПО в С4 диаграммах в Draw.io ([ссылка](https://drive.google.com/file/d/1o4nyLsC-T8OGUrBmCNb4Tvr0_LtFqp1p/view)).
+
+Пройдемся кратко по основным идеям и ключевым особенностям VLMHyperBench:
+● Все его компоненты VLMHyperBench представлены в отдельных python-пакетах [ссылка](https://github.com/orgs/VLMHyperBenchTeam/repositories).
+
+![](../files/ml_system_design_doc-20250127.png)
+Запуск VLM на инференсе фреймворках (`Hugging Face`, `vLLM`, `SGlang`) осуществляется в изолированной среде (Docker-контейнерах). При запуске Docker-контейнера в него устанавливается нужный для этого запуска набор компонентов ПО в виде python-пакетов. 
+Это обеспечивает гибкость архитектуры и постоянства Docker-контейнеров, опубликованных в нашем Container Registry ([ссылка](https://github.com/orgs/VLMHyperBenchTeam/packages)).
+●        подбор промптов для полей документа
+●        сравнительный анализ метрик, потребляемых ресурсов и скорости инференса VLM для различных фреймворков, моделей и датасетов.
+●        использование ПО в CI/CD пайплайнах для тестирования Docker-образов с VLM.
+
+Запуск ПО VLMHyperBench состоит из 4 этапов:
+1. планирование задач
+2. запуск VLM в Docker-контейнерах
+3. оценка метрик
+4. генерация отчета с диаграммами.
+
+![](../files/ml_system_design_doc-20250127-1.png)
+
+Два этапа: **2. запуск VLM в Docker контейнер** + **3. Оценка метрик** мы объединяем в понятие **Задача**.
+
+Работа ПО обычно выглядит так:
+* один этап запуска планировщика задач - распределяет по всем разрешенным ГПУ **Задачи**(**2. запуск VLM в Docker контейнер** + **3. Оценка метрик**).
+* запускает на каждой разрешенной ГПУ в параллельно по 1 **Задаче**. **Задач** обычно несколько.
+
+Если в у нас 6 **Задача**, например:
+* "Датасет паспортов, Фреймворк Hugging face, Модель Qwen2-VL-2B, Метрика CER"
+* "Датасет паспортов, Фреймворк vLLM, Модель Qwen2-VL-2B, Метрика CER"
+* "Датасет паспортов, Фреймворк SGLang, Модель Qwen2-VL-2B, Метрика CER" 
+* "Датасет СНИЛСОВ, Фреймворк Hugging face, Модель Qwen2-VL-2B, Метрика CER"
+* "Датасет СНИЛСОВ, Фреймворк vLLM, Модель Qwen2-VL-2B, Метрика CER"
+* "Датасет СНИЛСОВ, Фреймворк SGLang, Модель Qwen2-VL-2B, Метрика CER"
+
+Если есть 3 ГПУ в системе, то будет 2 цикла запуска параллельно по 1 задаче на каждой ГПУ.  
+Если есть 2 ГПУ в системе, то будет 3 цикла запуска параллельно по 1 задаче на каждой ГПУ. 
+Если есть 1 ГПУ в системе, то будет 6 циклов запуска параллельно по 1 задаче на каждой ГПУ.
+
+##### Этап 1 Планирование
+
+На этапе 1 `UserConfigReader` считывает из **csv-конфига от пользователя** набор **Задач**. Каждая **Задача** описывается data-классом `BenchmarkRunConfig`. Далее `BenchmarkOrchestrator` запускает пайплайн из Docker-контейнеров согласно параметрам **Задачи**. В целом весь этот контейнер `BenchmarkScheduler` (по терминологии С4 диаграмм, технически это просто python-класс использующий классы: `UserConfigReader`, `BenchmarkRunConfig`) управляет запуском задач и распределением их по доступным для ПО системным ГПУ.
+![](../files/ml_system_design_doc-20250127-2.png)
+
+##### Этап 2 Запуск VLM
+
+И так `BenchmarkScheduler` запускает выполнение **Задачи**(**2. запуск VLM в Docker-контейнер** + **3. Оценка метрик**).
+
+Первым этапом в **Задаче** запускается Docker-контейнер с окружением для запуска VLM (например, Фреймворк Hugging face, Модель Qwen2-VL-2B).
+
+При запуске контейнера этот `Docker-контейнер` устанавливаются все необходимые python-пакеты:
+* содержащие необходимые для работы VLMHyperBench-компоненты ([ссылка](https://vlmhyperbenchteam.github.io/VLMHyperBenchDocs/docs/category/api-docs))
+* а так же специализированный python-пакет для использования моделей семейства `Qwen2-VL`.
+
+Поддержка VLM-моделей реализована через паттерн проектирования Фабричный метод с регистрацией классов VLM-моделей из python-пакетов (подробнее в отдельной статье [ссылка](../cards/using_vlm_models_via_the_factory_method_in_vlmhyperbench.md)).
+
+Запускается контейнер VLLM (по терминологии С4 диаграмм и технически это Docker-контейнер) читает конфиг пробега, загружает датасет, получает коллекцию оптимальных промптов и системный промпт. Происходит загрузка модели, итерирование по датасету и сохранение ответов модели.
+
+
+![](../files/ml_system_design_doc-20250127-3.png)
+
+
+#### 4.2. Описание инфраструктуры и масштабируемости
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#42-%D0%BE%D0%BF%D0%B8%D1%81%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8%D0%BD%D1%84%D1%80%D0%B0%D1%81%D1%82%D1%80%D1%83%D0%BA%D1%82%D1%83%D1%80%D1%8B-%D0%B8-%D0%BC%D0%B0%D1%81%D1%88%D1%82%D0%B0%D0%B1%D0%B8%D1%80%D1%83%D0%B5%D0%BC%D0%BE%D1%81%D1%82%D0%B8)
+
+- Какая инфраструктура выбрана и почему `Data Scientist`
+- Плюсы и минусы выбора `Data Scientist`
+- Почему финальный выбор лучше других альтернатив `Data Scientist`
+
+#### 4.3. Требования к работе системы
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#43-%D1%82%D1%80%D0%B5%D0%B1%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F-%D0%BA-%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%B5-%D1%81%D0%B8%D1%81%D1%82%D0%B5%D0%BC%D1%8B)
+
+- SLA, пропускная способность и задержка `Data Scientist`
+
+#### 4.4. Безопасность системы
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#44-%D0%B1%D0%B5%D0%B7%D0%BE%D0%BF%D0%B0%D1%81%D0%BD%D0%BE%D1%81%D1%82%D1%8C-%D1%81%D0%B8%D1%81%D1%82%D0%B5%D0%BC%D1%8B)
+
+- Потенциальная уязвимость системы `Data Scientist`
+
+#### 4.5. Безопасность данных
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#45-%D0%B1%D0%B5%D0%B7%D0%BE%D0%BF%D0%B0%D1%81%D0%BD%D0%BE%D1%81%D1%82%D1%8C-%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D1%85)
+
+- Нет ли нарушений GDPR и других законов `Data Scientist`
+
+#### 4.6. Издержки
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#46-%D0%B8%D0%B7%D0%B4%D0%B5%D1%80%D0%B6%D0%BA%D0%B8)
+
+- Расчетные издержки на работу системы в месяц `Data Scientist`
+
+#### 4.5. Integration points
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#45-integration-points)
+
+- Описание взаимодействия между сервисами (методы API и др.) `Data Scientist`
+
+#### 4.6. Риски
+
+[](https://github.com/IrinaGoloshchapova/ml_system_design_doc_ru/blob/main/ML_System_Design_Doc_Template.md#46-%D1%80%D0%B8%D1%81%D0%BA%D0%B8)
+
+- Описание рисков и неопределенностей, которые стоит предусмотреть `Data Scientist`
+
+
+
 
